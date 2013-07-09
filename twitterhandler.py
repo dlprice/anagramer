@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import httplib
 import logging
+import re
 # import threading
 import Queue
 import multiprocessing
@@ -43,6 +44,7 @@ class StreamHandler(object):
         self._iter = self.__iter__()
         self._tweets_seen = multiprocessing.Value('L', 0)  # for passing stats between processes
         self._passed_filter = multiprocessing.Value('L', 0)
+        self._passed_filter2 = multiprocessing.Value('L', 0)
         self._overflow = multiprocessing.Value('L', 0)
         self._lock = multiprocessing.Lock()
 
@@ -87,7 +89,7 @@ class StreamHandler(object):
     def next(self):
         return self._iter.next()
 
-    def _run(self, queue, stop_flag, seen, passed, overflow, lock):
+    def _run(self, queue, stop_flag, seen, passed, passed2, overflow, lock):
         stream = TwitterStream(
             auth=OAuth(ACCESS_KEY,
                        ACCESS_SECRET,
@@ -107,17 +109,22 @@ class StreamHandler(object):
                         continue
                     if tweet.get('text'):
                         # self._handle_tweet(tweet)
-                        with lock:
-                            seen.value += 1
+                        # with lock:
+                        #     seen.value += 1
                         if self.filter_tweet(tweet):
                             with lock:
                                 passed.value += 1
-                            try:
-                                queue.put(self.format_tweet(tweet), block=False)
-                            except Queue.Full:
-                                with lock:
-                                    overflow.value += 1
-                                pass
+                        if self.filter_test(tweet):
+                            with lock:
+                                passed2.value += 1
+                        if self.filter_tweet(tweet) and not self.filter_test(tweet):
+                            queue.put(self.format_tweet(tweet), block=False)
+                            # try:
+                            #     queue.put(self.format_tweet(tweet), block=False)
+                            # except Queue.Full:
+                            #     with lock:
+                            #         overflow.value += 1
+                            #     pass
         except SSLError as err:
             print(err)
             logging.error(err)
@@ -167,6 +174,7 @@ class StreamHandler(object):
                                       self._process_should_end,
                                       self._tweets_seen,
                                       self._passed_filter,
+                                      self._passed_filter2,
                                       self._overflow,
                                       self._lock))
         self.stream_process.daemon = True
@@ -198,6 +206,36 @@ class StreamHandler(object):
 
     def bufferlength(self):
         return self.queue.qsize()
+
+    def filter_test(self, tweet):
+        """
+        filter out anagram-inappropriate tweets
+        """
+        NON_ASCII_CHARS_CUTOFF = 0.8
+        #check for mentions
+        if len(tweet.get('entities').get('user_mentions')) is not 0:
+            return False
+        #check for retweets
+        if tweet.get('retweeted_status'):
+            return False
+        # # ignore tweets w/ non-ascii characters
+        t = re.sub(r'[^a-zA-Z0-9 #\^\(\)\?\$\.\+\"\'\!]', '', tweet['text']).lower()
+        # t = re.sub(r'[^a-zA-Z0-9 \^&)\(:;<>,\.!\?@#\+-"\)\/\\]', '', tweet['text']).lower()
+        if (float(len(t)) / len(tweet['text'])) < NON_ASCII_CHARS_CUTOFF:
+            return False
+        # check for links:
+        if len(tweet.get('entities').get('urls')) is not 0:
+            return False
+        # ignore short tweets
+        t = utils.stripped_string(tweet['text'])
+        if len(t) <= ANAGRAM_LOW_CHAR_CUTOFF:
+            return False
+        # ignore tweets with few characters
+        st = set(t)
+        if len(st) <= ANAGRAM_LOW_UNIQUE_CHAR_CUTOFF:
+            return False
+        return True
+
 
     def filter_tweet(self, tweet):
         """
@@ -398,8 +436,24 @@ if __name__ == "__main__":
     stream = StreamHandler()
     stream.start()
 
-    for t in stream:
-        count += 1
-        print(count, stream.tweets_seen, stream.passed_filter)
-        if count > 100:
-            stream.close()
+    while 1:
+        with stream._lock:
+            p1 = stream._passed_filter.value
+            p2 = stream._passed_filter2.value
+
+        print(p1, p2)
+        time.sleep(0.1)
+
+    # for t in stream:
+    #     with stream._lock:
+    #         p1 = stream._passed_filter.value
+    #         p2 = stream._passed_filter2.value
+
+    #     print(p1, p2)
+    #     print(t)
+
+
+        # count += 1
+        # print(count, stream.tweets_seen, stream.passed_filter)
+        # if count > 100:
+        #     stream.close()
